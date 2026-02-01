@@ -75,7 +75,13 @@ const upload = multer({
 });
 
 initPassport();
-app.use(cors({ origin: true }));
+const frontendUrl = process.env.FRONTEND_URL;
+app.use(
+  cors({
+    origin: frontendUrl ? frontendUrl.split(',').map((u) => u.trim()).filter(Boolean) : true,
+    credentials: true,
+  })
+);
 app.use(express.json());
 app.use(passport.initialize());
 
