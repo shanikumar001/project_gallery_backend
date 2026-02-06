@@ -7,6 +7,7 @@ import fs from 'fs';
 import mongoose from 'mongoose';
 import { fileURLToPath } from 'url';
 import { v4 as uuidv4 } from 'uuid';
+import cloudinary from './cloudinary.js';
 
 import passport from 'passport';
 import authRoutes, { initPassport } from './routes/auth.js';
@@ -76,6 +77,7 @@ const upload = multer({
 
 initPassport();
 const frontendUrl = process.env.FRONTEND_URL;
+// ? frontendUrl.split(',').map((u) => u.trim()).filter(Boolean) : true
 app.use(
   cors({
     origin: frontendUrl ? frontendUrl.split(',').map((u) => u.trim()).filter(Boolean) : true,
@@ -85,8 +87,43 @@ app.use(
 app.use(express.json());
 app.use(passport.initialize());
 
+// cloudinary :
+const uploadOnCloudinary = async (localFilePath) => {
+  try {
+    const result = await cloudinary.uploader.upload(localFilePath, {
+      resource_type: "auto",
+    });
+    fs.unlinkSync(localFilePath);
+    // console.log(result);
+    return result;
+    
+  } catch (err) {
+    if (fs.existsSync(localFilePath)) fs.unlinkSync(localFilePath);
+    return null;
+  }
+};
+
+app.post("/api/media", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: "No file uploaded" });
+    }
+
+    const result = await uploadOnCloudinary(req.file.path);
+
+    if (!result) {
+      return res.status(500).json({ message: "Upload failed" });
+    }
+
+    res.json({ success: true, url: result.secure_url });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+
 // Serve uploaded media files
-app.use('/api/media', express.static(UPLOADS_DIR));
+// app.use('/api/media', express.static(UPLOADS_DIR));
 
 // Auth routes
 app.use('/api/auth', authRoutes);
@@ -153,11 +190,11 @@ app.post('/api/projects', authenticateToken, upload.single('media'), async (req,
   try {
     const { title, description, liveDemoUrl, codeUrl } = req.body;
 
-    if (!title || !title.trim()) {
+    if (!title?.trim()) {
       return res.status(400).json({ error: 'Title is required' });
     }
 
-    if (!description || !description.trim()) {
+    if (!description?.trim()) {
       return res.status(400).json({ error: 'Description is required' });
     }
 
@@ -165,13 +202,19 @@ app.post('/api/projects', authenticateToken, upload.single('media'), async (req,
       return res.status(400).json({ error: 'Media file is required' });
     }
 
+    // 🔥 Upload project media to Cloudinary
+    const uploadResult = await uploadOnCloudinary(req.file.path);
+
+    if (!uploadResult) {
+      return res.status(500).json({ error: 'Media upload failed' });
+    }
+
     const count = await Project.countDocuments();
-    const mediaUrl = `/api/media/${req.file.filename}`;
 
     const project = await Project.create({
       title: title.trim(),
       description: description.trim(),
-      media: [{ url: mediaUrl, filename: req.file.filename }],
+      media: [{ url: uploadResult.secure_url }],
       order: count,
       userId: req.user._id,
       liveDemoUrl: liveDemoUrl?.trim() || '',
@@ -184,15 +227,14 @@ app.post('/api/projects', authenticateToken, upload.single('media'), async (req,
       description: project.description,
       media: project.media,
       order: project.order,
-      liveDemoUrl: project.liveDemoUrl,
-      codeUrl: project.codeUrl,
       createdAt: project.createdAt,
     });
   } catch (err) {
-    console.error('Error adding project:', err);
-    res.status(500).json({ error: err.message || 'Failed to add project' });
+    console.error(err);
+    res.status(500).json({ error: err.message });
   }
 });
+
 
 // Project interactions (like, comment, save)
 app.use('/api/projects', projectRoutes);
