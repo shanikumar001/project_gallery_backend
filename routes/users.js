@@ -4,6 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { v4 as uuidv4 } from 'uuid';
+import cloudinary from '../cloudinary.js';
 
 import { authenticateToken } from '../middleware/auth.js';
 import User from '../models/User.js';
@@ -16,28 +17,46 @@ const __dirname = path.dirname(__filename);
 
 const router = express.Router();
 
-const AVATARS_DIR = path.join(__dirname, '../uploads/avatars');
-if (!fs.existsSync(AVATARS_DIR)) {
-  fs.mkdirSync(AVATARS_DIR, { recursive: true });
-}
+// const AVATARS_DIR = path.join(__dirname, '../uploads/avatars');
+// if (!fs.existsSync(AVATARS_DIR)) {
+//   fs.mkdirSync(AVATARS_DIR, { recursive: true });
+// }
 
-const avatarStorage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, AVATARS_DIR),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname) || '.jpg';
-    cb(null, `avatar-${uuidv4()}${ext}`);
-  },
-});
+// const avatarStorage = multer.diskStorage({
+//   destination: (req, file, cb) => cb(null, AVATARS_DIR),
+//   filename: (req, file, cb) => {
+//     const ext = path.extname(file.originalname) || '.jpg';
+//     cb(null, `avatar-${uuidv4()}${ext}`);
+//   },
+// });
 
-const uploadAvatar = multer({
-  storage: avatarStorage,
-  limits: { fileSize: 2 * 1024 * 1024 },
+ const uploadAvatar = multer({
+  storage: multer.memoryStorage(), // ✅ correct
+  limits: { fileSize: 2 * 1024 * 1024 }, // 2MB
   fileFilter: (req, file, cb) => {
     const allowed = ['image/jpeg', 'image/png', 'image/webp'];
     if (allowed.includes(file.mimetype)) cb(null, true);
     else cb(new Error('Invalid image type'));
   },
 });
+
+
+// cloudinary :
+const uploadAvatarToCloudinary = async (buffer) => {
+  return new Promise((resolve, reject) => {
+    cloudinary.uploader.upload_stream(
+      {
+        folder: 'avatars',
+        resource_type: 'image',
+      },
+      (error, result) => {
+        if (error) reject(error);
+        else resolve(result);
+      }
+    ).end(buffer);
+  });
+};
+
 
 // Get current user profile - must be before /:id
 router.get('/me', authenticateToken, async (req, res) => {
@@ -134,52 +153,67 @@ router.get('/:id', async (req, res) => {
 });
 
 // Update profile (name, username, bio, photo)
-router.put('/me', authenticateToken, uploadAvatar.single('profilePhoto'), async (req, res) => {
-  try {
-    const updates = {};
-    if (req.body.name?.trim() !== undefined) updates.name = req.body.name.trim();
-    if (req.body.bio !== undefined) updates.bio = (req.body.bio || '').trim().slice(0, 500);
-    if (req.file) updates.profilePhoto = `/api/media/avatars/${req.file.filename}`;
+router.put(
+  '/me',
+  authenticateToken,
+  uploadAvatar.single('profilePhoto'),
+  async (req, res) => {
+    try {
+      const updates = {};
 
-    const usernameRaw = req.body.username?.trim()?.toLowerCase();
-    if (usernameRaw !== undefined && usernameRaw !== '') {
-      if (usernameRaw.length < 3) {
-        return res.status(400).json({ error: 'Username must be at least 3 characters' });
+      if (req.body.name?.trim() !== undefined)
+        updates.name = req.body.name.trim();
+
+      if (req.body.bio !== undefined)
+        updates.bio = (req.body.bio || '').trim().slice(0, 500);
+
+      if (req.file) {
+        const result = await uploadAvatarToCloudinary(req.file.buffer);
+        updates.profilePhoto = result.secure_url;
       }
-      if (!/^[a-z0-9_.]+$/.test(usernameRaw)) {
-        return res.status(400).json({ error: 'Username can only contain letters, numbers, dots and underscores' });
+
+      // username validation (unchanged)
+      const usernameRaw = req.body.username?.trim()?.toLowerCase();
+      if (usernameRaw) {
+        if (usernameRaw.length < 3) {
+          return res.status(400).json({ error: 'Username must be at least 3 characters' });
+        }
+        if (!/^[a-z0-9_.]+$/.test(usernameRaw)) {
+          return res.status(400).json({
+            error: 'Username can only contain letters, numbers, dots and underscores',
+          });
+        }
+        const existing = await User.findOne({
+          username: usernameRaw,
+          _id: { $ne: req.user._id },
+        });
+        if (existing) {
+          return res.status(400).json({ error: 'Username already taken' });
+        }
+        updates.username = usernameRaw;
       }
-      const existing = await User.findOne({
-        username: usernameRaw,
-        _id: { $ne: req.user._id },
+
+      const user = await User.findByIdAndUpdate(req.user._id, updates, {
+        new: true,
+        runValidators: true,
+      }).select('-password');
+
+      res.json({
+        user: {
+          id: user._id.toString(),
+          name: user.name,
+          username: user.username,
+          email: user.email,
+          profilePhoto: user.profilePhoto,
+          bio: user.bio || '',
+        },
       });
-      if (existing) {
-        return res.status(400).json({ error: 'Username already taken' });
-      }
-      updates.username = usernameRaw;
+    } catch (err) {
+      res.status(500).json({ error: err.message });
     }
-
-    const user = await User.findByIdAndUpdate(req.user._id, updates, {
-      new: true,
-      runValidators: true,
-    }).select('-password');
-
-    const token = req.headers.authorization?.split(' ')[1];
-    res.json({
-      user: {
-        id: user._id.toString(),
-        name: user.name,
-        username: user.username || (user.email && user.email.split('@')[0]) || '',
-        email: user.email,
-        profilePhoto: user.profilePhoto,
-        bio: user.bio || '',
-      },
-      token,
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
   }
-});
+);
+
 
 // Follow request (Instagram-style: creates "requested" until accepted)
 router.post('/:id/follow', authenticateToken, async (req, res) => {
