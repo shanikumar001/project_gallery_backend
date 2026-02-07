@@ -1,105 +1,75 @@
-import nodemailer from 'nodemailer';
+import SibApiV3Sdk from 'sib-api-v3-sdk';
 
-let transporter = null;
+/* -------------------- Brevo setup -------------------- */
+const client = SibApiV3Sdk.ApiClient.instance;
+client.authentications['api-key'].apiKey = process.env.BREVO_API_KEY;
 
-// Initialize the transporter
-function getTransporter() {
-  if (transporter) return transporter;
+const emailApi = new SibApiV3Sdk.TransactionalEmailsApi();
 
-  const host = process.env.SMTP_HOST || 'smtp-relay.sendinblue.com';
-  const port = process.env.SMTP_PORT || 587;
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
-
-  if (!host || !user || !pass) {
-    console.warn(
-      'Email: SMTP not configured (SMTP_HOST, SMTP_USER, SMTP_PASS). Emails will not be sent.'
-    );
-    return null;
-  }
-
-  transporter = nodemailer.createTransport({
-    host,
-    port: Number(port),
-    secure: Number(port) === 465, // true only for port 465
-    logger: true,       
-    debug: true, 
-    auth: { user, pass },
-    tls: { rejectUnauthorized: false }, // avoid SSL issues
-    connectionTimeout: 10000, // 10s timeout
-  });
-
-  return transporter;
-}
-
-// Generic email sender
+/* -------------------- Generic sender -------------------- */
 export async function sendEmail({ to, subject, text, html }) {
-  const transport = getTransporter();
-  if (!transport) return { sent: false, reason: 'SMTP not configured' };
-
-  const from =
-    process.env.EMAIL_FROM || process.env.SMTP_FROM || process.env.SMTP_USER || 'noreply@example.com';
-
   try {
-    const info = await transport.sendMail({ from, to, subject, text, html });
-    console.log('Email sent:', info.response || info);
+    await emailApi.sendTransacEmail({
+      sender: {
+        email: process.env.EMAIL_FROM_ADDRESS || 'no-reply@projectgallery.com',
+        name: process.env.EMAIL_FROM_NAME || 'Project Gallery',
+      },
+      to: [{ email: to }],
+      subject,
+      textContent: text,
+      htmlContent: html,
+    });
+
     return { sent: true };
   } catch (err) {
-    console.error('Email send error:', err);
+    console.error('Brevo email error:', err?.response?.body || err.message);
     return { sent: false, error: err.message };
   }
 }
 
-// Send OTP email
+/* -------------------- OTP email -------------------- */
 export async function sendOtpEmail({ toEmail, otp }) {
-  const emailResult = await sendEmail({
+  const result = await sendEmail({
     to: toEmail,
     subject: 'Your verification code - Project Gallery',
-    text: `Your verification code is: ${otp}. It expires in 10 minutes.`,
+    text: `Your verification code is ${otp}. It expires in 10 minutes.`,
     html: `
       <p>Your verification code is: <strong>${otp}</strong></p>
       <p>It expires in 10 minutes.</p>
-      <p>If you didn't request this, you can ignore this email.</p>
+      <p>If you didn’t request this, you can ignore this email.</p>
     `,
   });
 
-  if (!emailResult.sent) {
-    console.error('OTP email failed:', emailResult);
+  if (!result.sent) {
     throw new Error('Unable to send OTP. Please try again later.');
   }
 
-  return emailResult;
+  return result;
 }
 
-// Send follow request email
+/* -------------------- Follow request -------------------- */
 export async function sendFollowRequestEmail({ toEmail, fromName }) {
-  const emailResult = await sendEmail({
+  return sendEmail({
     to: toEmail,
     subject: `${fromName} wants to follow you`,
-    text: `${fromName} has sent you a follow request on Project Gallery. Log in to accept or decline.`,
+    text: `${fromName} has sent you a follow request on Project Gallery.`,
     html: `
-      <p><strong>${fromName}</strong> has sent you a follow request on Project Gallery.</p>
+      <p><strong>${fromName}</strong> has sent you a follow request.</p>
       <p>Log in to accept or decline.</p>
     `,
   });
-
-  if (!emailResult.sent) console.error('Follow request email failed:', emailResult);
-  return emailResult;
 }
 
-// Send new message email
+/* -------------------- New message -------------------- */
 export async function sendNewMessageEmail({ toEmail, fromName, messagePreview }) {
-  const emailResult = await sendEmail({
+  return sendEmail({
     to: toEmail,
     subject: `${fromName} sent you a message`,
-    text: `You have a new message from ${fromName}:\n\n"${messagePreview}"\n\nLog in to Project Gallery to reply.`,
+    text: `New message from ${fromName}:\n\n"${messagePreview}"`,
     html: `
       <p>You have a new message from <strong>${fromName}</strong>.</p>
       <p>"${messagePreview}"</p>
-      <p>Log in to Project Gallery to reply.</p>
+      <p>Log in to reply.</p>
     `,
   });
-
-  if (!emailResult.sent) console.error('Message email failed:', emailResult);
-  return emailResult;
 }
