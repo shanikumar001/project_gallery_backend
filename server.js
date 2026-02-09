@@ -17,6 +17,8 @@ import messageRoutes from './routes/messages.js';
 import { authenticateToken } from './middleware/auth.js';
 import Project from './models/Project.js';
 import User from './models/User.js';
+import locationRoutes from './routes/location.js';
+import UserCard from './models/UserCard.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -185,6 +187,9 @@ app.get('/api/projects/:id', async (req, res) => {
   }
 });
 
+
+
+
 // Add new project (requires authentication) - must be before projectRoutes
 app.post('/api/projects', authenticateToken, upload.single('media'), async (req, res) => {
   try {
@@ -229,11 +234,174 @@ app.post('/api/projects', authenticateToken, upload.single('media'), async (req,
       order: project.order,
       createdAt: project.createdAt,
     });
+    // console.log('OSM RAW RESPONSE:', data);
+
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
+
+
+
+const uploadProfilePhoto = async (localFilePath) => {
+  try {
+    const result = await cloudinary.uploader.upload(localFilePath, {
+      folder: "user_profiles",
+      resource_type: "image",
+      width: 400,
+      height: 400,
+      crop: "fill",
+      quality: "auto",
+      format: "webp",
+    });
+
+    fs.unlinkSync(localFilePath);
+    return result;
+  } catch (err) {
+    console.error("Profile photo upload failed:", err);
+    if (fs.existsSync(localFilePath)) fs.unlinkSync(localFilePath);
+    return null;
+  }
+};
+
+
+app.get("/api/user-card", async (req, res) => {
+  try {
+    const cards = await UserCard.find()
+      .sort({ order: 1, createdAt: -1 })
+      .select("fullName username passion skills profilePhoto location order createdAt");
+
+    res.json(cards);
+  } catch (err) {
+    console.error("Fetch user cards error:", err);
+    res.status(500).json({ error: "Failed to fetch user cards" });
+  }
+});
+
+
+// This is for user card :
+app.post(
+  "/api/user-card",
+  authenticateToken,
+  upload.single("profilePhoto"),
+  async (req, res) => {
+    try {
+      const {
+        fullName,
+        username,
+        passion,
+        education,
+        skills,
+        location,
+        portfolioUrl,
+        projectDemoUrl,
+        coordinates,
+      } = req.body;
+
+      /* ---------- Validation ---------- */
+      if (!fullName?.trim()) {
+        return res.status(400).json({ error: "Full name is required" });
+      }
+
+      if (!username?.trim()) {
+        return res.status(400).json({ error: "Username is required" });
+      }
+
+      const skillsArray = Array.isArray(skills)
+        ? skills
+        : skills?.split(",").map((s) => s.trim()).filter(Boolean);
+
+      if (!skillsArray || skillsArray.length === 0) {
+        return res.status(400).json({ error: "Skills are required" });
+      }
+
+      /* ---------- Parse coordinates ---------- */
+      let parsedCoordinates;
+      if (coordinates) {
+        parsedCoordinates =
+          typeof coordinates === "string"
+            ? JSON.parse(coordinates)
+            : coordinates;
+      }
+
+      /* ---------- Upload profile photo ---------- */
+      let profilePhoto;
+
+      if (req.file) {
+        const uploadResult = await uploadProfilePhoto(req.file.path);
+
+        if (!uploadResult) {
+          return res.status(500).json({ error: "Profile photo upload failed" });
+        }
+
+        profilePhoto = {
+          url: uploadResult.secure_url,
+          filename: uploadResult.public_id,
+        };
+      }
+
+      /* ---------- Order handling ---------- */
+      const existingCard = await UserCard.findOne({ userId: req.user._id });
+      const order = existingCard
+        ? existingCard.order
+        : await UserCard.countDocuments();
+
+      /* ---------- Payload ---------- */
+      const payload = {
+        userId: req.user._id,
+        fullName: fullName.trim(),
+        username: username.trim().toLowerCase(),
+        passion: passion?.trim() || "",
+        education: education?.trim() || "",
+        skills: skillsArray,
+        portfolioUrl: portfolioUrl?.trim() || "",
+        projectDemoUrl: projectDemoUrl?.trim() || "",
+        order,
+        location: {
+          address: location || "",
+          coordinates: parsedCoordinates,
+        },
+      };
+
+      if (profilePhoto) {
+        payload.profilePhoto = profilePhoto;
+      }
+
+      /* ---------- Create or Update ---------- */
+      const userCard = await UserCard.findOneAndUpdate(
+        { userId: req.user._id },
+        payload,
+        { new: true, upsert: true }
+      );
+
+      /* ---------- Response ---------- */
+      res.status(201).json({
+        id: userCard._id.toString(),
+        fullName: userCard.fullName,
+        username: userCard.username,
+        passion: userCard.passion,
+        skills: userCard.skills,
+        profilePhoto: userCard.profilePhoto,
+        location: userCard.location,
+        order: userCard.order,
+        createdAt: userCard.createdAt,
+      });
+    } catch (err) {
+      console.error("User card error:", err);
+      if (err.code === 11000) {
+        return res.status(409).json({ error: "Username already exists" });
+      }
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+
+
+//location :
+app.use('/api/location', locationRoutes);
+
 
 
 // Project interactions (like, comment, save)
